@@ -1,9 +1,13 @@
-#include <serialize.h>
-
+#include "serialize.h"
+#include <avr/sleep.h>
 #include "packet.h"
 #include "constants.h"
 #include <stdarg.h>
 #include <math.h>
+#include <Wire.h>
+#include "Adafruit_TCS34725.h"
+#include "pitches.h"
+
 
 typedef enum
 {
@@ -16,6 +20,25 @@ typedef enum
 
 volatile TDirection dir = STOP;
 
+#define PRR_TWI_MASK                0b10000000
+#define PRR_SPI_MASK                0b00000100
+#define ADCSRA_ADC_MASK             0b10000000
+#define PRR_ADC_MASK                0b00000001
+#define PRR_TIMER2_MASK             0b01000000
+#define PRR_TIMER0_MASK             0b00100000
+#define PRR_TIMER1_MASK             0b00001000
+#define SMCR_SLEEP_ENABLE_MASK      0b00000001
+#define SMCR_IDLE_MODE_MASK         0b11110000
+
+#define redpin 3
+#define greenpin 5
+#define bluepin 6
+
+#define commonAnode true
+
+Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+
+byte gammatable[256];
 
 /*
    Alex's configuration constants
@@ -34,7 +57,7 @@ volatile TDirection dir = STOP;
 
 
 //Pi, for calculating turn circumference
-#define PI 3.141592654
+//#define PI 3.141592654
 
 //Alex's length and breadth in cm
 #define ALEX_LENGTH 22
@@ -53,7 +76,7 @@ float alexCirc = 0.0;
 #define RR                  11  // Right reverse pin
 
 /*
-      Alex's State Variables
+   Alex's State Variables
 */
 
 // Store the ticks from Alex's left and
@@ -205,6 +228,43 @@ void sendOK()
   okPacket.packetType = PACKET_TYPE_RESPONSE;
   okPacket.command = RESP_OK;
   sendResponse(&okPacket);
+}
+
+
+void sendColourCode()
+{
+  TPacket colourPacket;
+  colourPacket.packetType = PACKET_TYPE_RESPONSE;
+  colourPacket.command = RESP_RGB_COLOUR;
+
+  float red, green, blue;
+
+  tcs.setInterrupt(false);  // turn on LED
+
+  delay(60);  // takes 50ms to read
+
+  tcs.getRGB(&red, &green, &blue);
+
+  tcs.setInterrupt(true);  // turn off LED
+
+  colourPacket.params[0] = (uint32_t)red;
+  colourPacket.params[1] = (uint32_t)green;
+  colourPacket.params[2] = (uint32_t)blue;
+
+  char colour = red > green ? 'r' : 'g';
+  colourPacket.params[3] = colour;
+
+  //#if defined(ARDUINO_ARCH_ESP32)
+  //  ledcWrite(1, gammatable[(int)red]);
+  //  ledcWrite(2, gammatable[(int)green]);
+  ////  ledcWrite(3, gammatable[(int)blue]);
+  //#else
+  analogWrite(redpin, gammatable[(int)red]);
+  analogWrite(greenpin, gammatable[(int)green]);
+  analogWrite(bluepin, gammatable[(int)blue]);
+  //#endif/
+
+  sendResponse(&colourPacket);
 }
 
 void sendResponse(TPacket *packet)
@@ -368,11 +428,13 @@ void writeSerial(const char *buffer, int len)
 void setupMotors()
 {
   /* Our motor set up is:
-        A1IN - Pin 5, PD5, OC0B
-        A2IN - Pin 6, PD6, OC0A
-        B1IN - Pin 10, PB2, OC1B
-        B2In - pIN 11, PB3, OC2A
+     A1IN - Pin 5, PD5, OC0B
+     A2IN - Pin 6, PD6, OC0A
+     B1IN - Pin 10, PB2, OC1B
+     B2In - pIN 11, PB3, OC2A
   */
+  TCNT0 = 0;
+  TCNT1 = 1;
 }
 
 // Start the PWM for Alex's motors.
@@ -407,7 +469,7 @@ void forward(float dist, float speed)
   int val = pwmVal(speed);
 
   // For now we will ignore dist and move
-  // forward indefinitely. We will fix this
+  // forward indefinitely. 16 * 4We will fix this
   // in Week 9.
 
   // LF = Left forward pin, LR = Left reverse pin
@@ -421,9 +483,11 @@ void forward(float dist, float speed)
 
   newDist = forwardDist + deltaDist;
 
-  int right_val = (val * 0.95);
+  int left_val = (val * 0.9);
+  int right_val = (val * 0.9);
+  
   analogWrite(LF, val);
-  analogWrite(RF, right_val);
+  analogWrite(RF, val);
   analogWrite(LR, 0);
   analogWrite(RR, 0);
 }
@@ -447,17 +511,18 @@ void reverse(float dist, float speed)
   // RF = Right forward pin, RR = Right reverse pin
   // This will be replaced later with bare-metal code.
 
-   if (dist > 0)
+  if (dist > 0)
     deltaDist = dist;
   else
     deltaDist = 999999;
 
   newDist = reverseDist + deltaDist;
 
-  int right_val = (val * 0.8);
-  
+  int left_val = (val * 0.9);
+  int right_val = (val * 0.9);
+
   analogWrite(LR, val);
-  analogWrite(RR, right_val);
+  analogWrite(RR, val);
   analogWrite(LF, 0);
   analogWrite(RF, 0);
 }
@@ -484,9 +549,10 @@ void left(float ang, float speed)
   dir = LEFT;
 
   int val = pwmVal(speed);
-  int right_val = (val * 0.8);
+  int left_val = (val * 0.9);
+  int right_val = (val * 0.9);
 
-  if(ang == 0)
+  if (ang == 0)
     deltaTicks = 9999999;
   else {
     deltaTicks = computeLeftDeltaTicks(ang);
@@ -499,7 +565,7 @@ void left(float ang, float speed)
   // To turn left we reverse the left wheel and move
   // the right wheel forward.
   analogWrite(LR, val);
-  analogWrite(RF, right_val);
+  analogWrite(RF, val);
   analogWrite(LF, 0);
   analogWrite(RR, 0);
 }
@@ -514,21 +580,23 @@ void right(float ang, float speed)
   dir = RIGHT;
 
   int val = pwmVal(speed);
-  int right_val = (val * 0.8);
+  int left_val = (val * 0.9);
+  int right_val = (val * 0.9);
 
-  if(ang == 0)
+  if (ang == 0)
     deltaTicks = 9999999;
   else {
     deltaTicks = computeRightDeltaTicks(ang);
   }
 
-  targetTicks = rightReverseTicksTurns + deltaTicks;
-
+   targetTicks = rightReverseTicksTurns + deltaTicks;
+//  targetTicks = leftForwardTicksTurns + deltaTicks;
+  
   // For now we will ignore ang. We will fix this in Week 9.
   // We will also replace this code with bare-metal later.
   // To turn right we reverse the right wheel and move
   // the left wheel forward.
-  analogWrite(RR, right_val);
+  analogWrite(RR, val);
   analogWrite(LF, val);
   analogWrite(LR, 0);
   analogWrite(RF, 0);
@@ -579,6 +647,98 @@ void initializeState()
   clearCounters();
 }
 
+void WDT_off(void)
+{
+  /* Global interrupt should be turned OFF here if not
+     already done so */
+  /* Clear WDRF in MCUSR */
+  MCUSR &= ~(1 << WDRF);
+  /* Write logical one to WDCE and WDE */
+  /* Keep old prescaler setting to prevent unintentional
+     time-out */
+  WDTCSR |= (1 << WDCE) | (1 << WDE);
+  /* Turn off WDT */
+  WDTCSR = 0x00;
+  /* Global interrupt should be turned ON here if
+     subsequent operations after calling this function DO
+     NOT require turning off global interrupt */
+}
+
+void setupPowerSaving()
+{
+  WDT_off();
+  PRR |= PRR_TWI_MASK;
+  PRR |= PRR_SPI_MASK;
+  ADCSRA &= ~(ADCSRA_ADC_MASK);
+  PRR |= PRR_ADC_MASK;
+  SMCR |= SMCR_IDLE_MODE_MASK;
+  DDRB |= 0b00100000;
+  PORTB &= ~(0b00100000);
+
+}
+
+void handlePacket(TPacket *packet)
+{
+  switch (packet->packetType)
+  {
+    case PACKET_TYPE_COMMAND:
+      handleCommand(packet);
+      break;
+
+    case PACKET_TYPE_RESPONSE:
+      break;
+
+    case PACKET_TYPE_ERROR:
+      break;
+
+    case PACKET_TYPE_MESSAGE:
+      break;
+
+    case PACKET_TYPE_HELLO:
+      break;
+  }
+}
+
+void putArduinoToIdle()
+{
+  PRR |= (PRR_TIMER2_MASK | PRR_TIMER0_MASK | PRR_TIMER1_MASK);
+  SMCR |= SMCR_SLEEP_ENABLE_MASK;
+  sleep_cpu();
+  SMCR &= ~(SMCR_SLEEP_ENABLE_MASK);
+  PRR &= ~(PRR_TIMER2_MASK | PRR_TIMER0_MASK | PRR_TIMER1_MASK);
+}
+
+void victory_tune() {
+
+  int melody[] = {
+    NOTE_FS5, NOTE_FS5, NOTE_D5, NOTE_B4, NOTE_B4, NOTE_E5,
+    NOTE_E5, NOTE_E5, NOTE_GS5, NOTE_GS5, NOTE_A5, NOTE_B5,
+    NOTE_A5, NOTE_A5, NOTE_A5, NOTE_E5, NOTE_D5, NOTE_FS5,
+    NOTE_FS5, NOTE_FS5, NOTE_E5, NOTE_E5, NOTE_FS5, NOTE_E5
+  };
+
+  // The note duration, 8 = 8th note, 4 = quarter note, etc.
+  int durations[] = {
+    8, 8, 8, 4, 4, 4,
+    4, 5, 8, 8, 8, 8,
+    8, 8, 8, 4, 4, 4,
+    4, 5, 8, 8, 8, 8
+  };
+  // determine the length of the arrays to use in the loop iteration
+  int songLength = sizeof(melody) / sizeof(melody[0]);
+
+  for (int thisNote = 0; thisNote < songLength; thisNote++) {
+
+    int duration = 1000 / durations[thisNote];
+    tone(8, melody[thisNote], duration);
+    // pause between notes
+    int pause = duration * 1.3;
+    delay(pause);
+    // stop the tone
+    noTone(8);
+  }
+}
+
 void handleCommand(TPacket *command)
 {
   switch (command->command)
@@ -611,7 +771,38 @@ void handleCommand(TPacket *command)
       sendOK();
       stop();
       break;
-
+    case COMMAND_COLOUR:
+      sendOK();
+      sendColourCode();
+      break;
+    case COMMAND_END:
+      sendOK();
+      victory_tune();
+      victory_tune();
+      victory_tune();
+      setupPowerSaving();
+      putArduinoToIdle();
+      break;
+    case COMMAND_W:
+      sendOK();
+      forward((float) 5, (float) 100);
+      break;
+    case COMMAND_S:
+      sendOK();
+      reverse((float) 5, (float) 100);
+      break;
+    case COMMAND_A:
+      sendOK();
+      left((float) 20, (float) 100);
+      break;
+    case COMMAND_D:
+      sendOK();
+      right((float) 20, (float) 100);
+      break;
+    case COMMAND_E:
+      sendOK();
+      right((float) 200, (float) 100);
+      break;
     /*
        Implement code for other commands here.
     */
@@ -656,10 +847,49 @@ void waitForHello()
   } // !exit
 }
 
+
+void setupAdafruit()
+{
+  if (tcs.begin()) {
+    //Serial.println("Found sensor");
+  } else {
+    //    Se/rial.println("No TCS34725 found ... check your connections");
+    while (1); // halt!
+  }
+
+#if defined(ARDUINO_ARCH_ESP32)
+  ledcAttachPin(redpin, 1);
+  ledcSetup(1, 12000, 8);
+  ledcAttachPin(greenpin, 2);
+  ledcSetup(2, 12000, 8);
+  ledcAttachPin(bluepin, 3);
+  ledcSetup(3, 12000, 8);
+#else
+  pinMode(redpin, OUTPUT);
+  pinMode(greenpin, OUTPUT);
+  pinMode(bluepin, OUTPUT);
+#endif
+
+  for (int i = 0; i < 256; i++) {
+    float x = i;
+    x /= 255;
+    x = pow(x, 2.5);
+    x *= 255;
+
+    if (commonAnode) {
+      gammatable[i] = 255 - x;
+    } else {
+      gammatable[i] = x;
+    }
+    //Serial.println(gammatable[i]);
+  }
+
+}
+
 void setup() {
   // put your setup code here, to run once:
 
-  
+
   alexDiagonal = sqrt((ALEX_LENGTH * ALEX_LENGTH) + (ALEX_BREADTH * ALEX_BREADTH));
   alexCirc = PI * alexDiagonal;
 
@@ -671,29 +901,9 @@ void setup() {
   startMotors();
   enablePullups();
   initializeState();
+  //setupPowerSaving();
+  setupAdafruit();
   sei();
-}
-
-void handlePacket(TPacket *packet)
-{
-  switch (packet->packetType)
-  {
-    case PACKET_TYPE_COMMAND:
-      handleCommand(packet);
-      break;
-
-    case PACKET_TYPE_RESPONSE:
-      break;
-
-    case PACKET_TYPE_ERROR:
-      break;
-
-    case PACKET_TYPE_MESSAGE:
-      break;
-
-    case PACKET_TYPE_HELLO:
-      break;
-  }
 }
 
 void loop() {
@@ -703,8 +913,9 @@ void loop() {
   //  forward(0, 100);
 
   // Uncomment the code below for Week 9 Studio 2
-
   // put your main code here, to run repeatedly:
+  //if (dir == STOP)
+  //putArduinoToIdle();
 
   if (deltaDist > 0)
   {
@@ -743,16 +954,15 @@ void loop() {
         stop();
       }
     }
-    else
-      if (dir == RIGHT) {
-        if (rightReverseTicksTurns >= targetTicks) {
-          deltaTicks = 0;
-          targetTicks = 0;
-          stop();
-        }
+    else if (dir == RIGHT) {
+      if (rightReverseTicksTurns >= targetTicks) {
+        deltaTicks = 0;
+        targetTicks = 0;
+        stop();
       }
+    }
   }
-  
+
   TPacket recvPacket; // This holds commands from the Pi
 
   TResult result = readPacket(&recvPacket);
